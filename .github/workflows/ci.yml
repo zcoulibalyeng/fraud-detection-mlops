@@ -40,4 +40,4 @@ jobs:
           MLFLOW_TRACKING_URI: http://localhost:5000
 
       - name: Build Docker image (smoke test)
-        run: docker build -f serving/Dockerfile -t fraud-detector:ci .
+        run: docker build -f Dockerfile -t fraud-detector:ci .
