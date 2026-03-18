@@ -1,0 +1,20 @@
+data:
+  raw_path: "s3://fraud-mlops-{env}/raw/creditcard.csv"
+  train_path: "s3://fraud-mlops-{env}/processed/train.parquet"
+  val_path: "s3://fraud-mlops-{env}/processed/val.parquet"
+  test_path: "s3://fraud-mlops-{env}/processed/test.parquet"
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+
+mlflow:
+  experiment_name: fraud-detection
+  tracking_uri: "http://localhost:5000"
+  registry_uri: "http://localhost:5000"
+  model_name: fraud-detector
+
+sagemaker:
+  instance_type: ml.m5.xlarge
+  instance_count: 1
+  use_spot: true
+  max_wait: 7200

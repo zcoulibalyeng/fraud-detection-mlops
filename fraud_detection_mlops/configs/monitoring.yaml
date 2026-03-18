@@ -1,0 +1,35 @@
+drift:
+  psi_warning_threshold: 0.10
+  psi_critical_threshold: 0.25
+  ks_pvalue_threshold: 0.05
+  min_samples_for_drift: 1000
+  check_frequency_hours: 24
+
+alerts:
+  slack_webhook_env_var: SLACK_WEBHOOK_URL
+  pagerduty_key_env_var: PAGERDUTY_KEY
+
+  rules:
+    - name: high_error_rate
+      metric: error_rate
+      threshold: 0.05
+      window_minutes: 3
+      severity: critical
+
+    - name: high_latency
+      metric: p99_latency_ms
+      threshold: 500
+      window_minutes: 5
+      severity: critical
+
+    - name: score_distribution_drift
+      metric: ks_pvalue
+      threshold: 0.01
+      window_minutes: 30
+      severity: warning
+
+    - name: feature_drift
+      metric: psi_max
+      threshold: 0.25
+      window_hours: 24
+      severity: warning

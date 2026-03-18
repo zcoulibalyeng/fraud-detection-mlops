@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# uv
+uv.lock
+
+# Environment
+.env
+*.env.local
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# Data — never commit raw data
+data/raw/
+*.csv
+*.parquet
+
+# Models — stored in MLflow/S3, not git
+*.pkl
+*.joblib
+*.pt
+*.pth
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Astronomer
+airflow_settings.yaml

@@ -1,0 +1,20 @@
+# Primary metric — new model must beat champion by at least this
+min_auc_pr_delta: 0.005
+min_f1_delta: 0.003
+
+# Absolute minimums regardless of champion
+min_auc_pr: 0.70
+min_f1: 0.75
+min_precision: 0.80
+min_recall: 0.70
+
+# Fairness — no slice can be worse than this
+max_slice_performance_gap: 0.05
+
+# Infrastructure
+max_p99_latency_ms: 100
+max_error_rate: 0.001
+
+# Statistical significance
+min_test_sample_size: 10000
+significance_level: 0.05

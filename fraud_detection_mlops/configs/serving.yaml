@@ -1,0 +1,19 @@
+host: "0.0.0.0"
+port: 8080
+workers: 4
+timeout: 30
+
+model:
+  registry_uri: "http://localhost:5000"
+  name: fraud-detector
+  stage: Production
+
+feature_store:
+  redis_host: localhost
+  redis_port: 6379
+  redis_db: 0
+
+monitoring:
+  log_predictions: true
+  prediction_log_path: "s3://fraud-mlops-{env}/predictions/"
+  metrics_port: 8081

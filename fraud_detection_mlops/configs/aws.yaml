@@ -1,0 +1,16 @@
+region: us-east-1
+account_id: ""  # filled from environment
+
+s3:
+  bucket_prefix: fraud-mlops
+  data_prefix: raw
+  processed_prefix: processed
+  model_prefix: models
+  predictions_prefix: predictions
+
+ecr:
+  repository: fraud-detection-mlops
+
+sagemaker:
+  role_env_var: SAGEMAKER_ROLE_ARN
+  endpoint_name: fraud-detector-{env}
