@@ -1,120 +1,59 @@
-#name: Deploy
-#
-##on:
-##  push:
-##    branches: [main]
-#
-#on:
-#  workflow_dispatch:
-#    inputs:
-#      environment:
-#        description: 'Deploy environment'
-#        required: true
-#        default: 'production'
-#        type: choice
-#        options:
-#          - staging
-#          - production
-#
-#env:
-#  AWS_REGION: us-east-1
-#  ECR_REPOSITORY: fraud-detection-mlops
-#  SAGEMAKER_ENDPOINT: fraud-detector-prod
-#
-#jobs:
-#  deploy:
-#    runs-on: ubuntu-latest
-#    # Only deploy if CI passes
-#    needs: []
-#    if: github.ref == 'refs/heads/main'
-#
-#    steps:
-#      - uses: actions/checkout@v4
-#
-#      # --- NEW STEPS TO FIX THE ERROR ---
-#      - name: Install uv
-#        uses: astral-sh/setup-uv@v2
-#        with:
-#          version: "latest"
-#
-#      - name: Set up Python 3.11
-#        run: uv python install 3.11
-#
-#      - name: Install dependencies
-#        run: uv sync --no-dev
-#
-#
-#      - name: Configure AWS credentials
-#        uses: aws-actions/configure-aws-credentials@v4
-#        with:
-#          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#          aws-region: ${{ env.AWS_REGION }}
-#
-#      - name: Login to Amazon ECR
-#        id: login-ecr
-#        uses: aws-actions/amazon-ecr-login@v2
-#
-#      - name: Build, tag, and push image to ECR
-#        id: build-image
-#        env:
-#          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-#          IMAGE_TAG: ${{ github.sha }}
-#        run: |
-#          docker build \
-#            -f Dockerfile \
-#            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-#            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
-#            .
-#          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-#          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-#          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-#
-#      - name: Update SageMaker endpoint
-#        env:
-#          IMAGE_URI: ${{ steps.build-image.outputs.image }}
-#          SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
-#          PYTHONPATH: .
-#        run: |
-#          uv run python fraud_detection_mlops/scripts/deploy_sagemaker.py \
-#            --image-uri $IMAGE_URI \
-#            --endpoint-name $SAGEMAKER_ENDPOINT \
-#            --region $AWS_REGION
-#
-#      - name: Verify deployment
-#        run: |
-#          uv run python fraud_detection_mlops/scripts/verify_deployment.py \
-#            --endpoint-name $SAGEMAKER_ENDPOINT \
-#            --region $AWS_REGION
-
-
 name: Deploy
 
 on:
+  # Auto-deploy when CI passes on main
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+  # Manual trigger — redeploy any time, with environment choice
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Deploy environment'
+        description: "Deploy environment"
         required: true
-        default: 'production'
+        default: "production"
         type: choice
         options:
           - staging
           - production
+      image_tag:
+        description: "Image tag to deploy (defaults to latest main SHA)"
+        required: false
+        default: ""
 
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: fraud-detection-mlops
   SAGEMAKER_ENDPOINT: fraud-detector-prod
   ARTIFACT_BUCKET: fraud-mlops-artifacts
+  PYTHON_VERSION: "3.11"
 
 jobs:
   deploy:
+    name: Deploy to SageMaker
     runs-on: ubuntu-latest
 
-    steps:
-      - uses: actions/checkout@v4
+    # For workflow_run: only deploy if CI succeeded
+    # For workflow_dispatch: always run
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
 
+    # Prevent two deploys running at the same time
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # For workflow_run, check out the exact commit CI tested — not HEAD
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      # ── AWS auth ──────────────────────────────────────────────────────────
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -122,7 +61,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Get AWS Account ID
+      - name: Get AWS account ID
         id: account
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -132,58 +71,106 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, and push image to ECR
-        id: build-image
+      # ── Resolve the image to deploy ───────────────────────────────────────
+      - name: Resolve image URI
+        id: image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build \
-            -f Dockerfile \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
-            .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          # workflow_dispatch with explicit tag → use that tag
+          # workflow_dispatch without tag       → use latest main SHA
+          # workflow_run                        → use the SHA that triggered CI
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            TAG="${{ github.event.inputs.image_tag }}"
+          elif [ -n "${{ github.event.workflow_run.head_sha }}" ]; then
+            TAG="${{ github.event.workflow_run.head_sha }}"
+          else
+            TAG="${{ github.sha }}"
+          fi
 
-      - name: Create S3 bucket for artifacts
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$TAG"
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "image_tag=$TAG"       >> $GITHUB_OUTPUT
+          echo "Deploying image: $IMAGE_URI"
+
+      # Verify the image actually exists in ECR before deploying
+      - name: Verify image exists in ECR
         run: |
-          aws s3 mb s3://${{ env.ARTIFACT_BUCKET }} --region ${{ env.AWS_REGION }} 2>/dev/null || true
+          aws ecr describe-images \
+            --repository-name $ECR_REPOSITORY \
+            --image-ids imageTag=${{ steps.image.outputs.image_tag }} \
+            --region $AWS_REGION
+          echo "✓ Image confirmed in ECR"
 
-      - name: Upload model artifacts to S3
-        run: |
-          aws s3 cp models/model.joblib s3://${{ env.ARTIFACT_BUCKET }}/artifacts/latest/model.joblib
-          aws s3 cp models/feature_pipeline.joblib s3://${{ env.ARTIFACT_BUCKET }}/artifacts/latest/feature_pipeline.joblib
-
+      # ── Python + uv ───────────────────────────────────────────────────────
       - name: Install uv
         uses: astral-sh/setup-uv@v2
         with:
           version: "latest"
 
-      - name: Set up Python
-        run: uv python install 3.11
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        run: uv python install ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
         run: uv sync --extra dev
 
+      # ── S3 model artifacts ────────────────────────────────────────────────
+      - name: Ensure S3 artifact bucket exists
+        run: |
+          aws s3 mb s3://${{ env.ARTIFACT_BUCKET }} \
+            --region ${{ env.AWS_REGION }} 2>/dev/null || true
+
+      - name: Upload model artifacts to S3
+        run: |
+          aws s3 cp models/model.joblib \
+            s3://${{ env.ARTIFACT_BUCKET }}/artifacts/latest/model.joblib
+
+          aws s3 cp models/feature_pipeline.joblib \
+            s3://${{ env.ARTIFACT_BUCKET }}/artifacts/latest/feature_pipeline.joblib
+
+          echo "✓ Artifacts uploaded to s3://${{ env.ARTIFACT_BUCKET }}/artifacts/latest/"
+
+      # ── SageMaker deploy ──────────────────────────────────────────────────
       - name: Deploy to SageMaker
         env:
-          IMAGE_URI: ${{ steps.build-image.outputs.image }}
+          IMAGE_URI: ${{ steps.image.outputs.image_uri }}
           SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
           PYTHONPATH: .
         run: |
           uv run python fraud_detection_mlops/scripts/deploy_sagemaker.py \
-            --image-uri $IMAGE_URI \
-            --endpoint-name $SAGEMAKER_ENDPOINT \
-            --region $AWS_REGION \
-            --artifact-bucket ${{ env.ARTIFACT_BUCKET }} \
-            --artifact-prefix artifacts/latest
+            --image-uri     "$IMAGE_URI" \
+            --endpoint-name "$SAGEMAKER_ENDPOINT" \
+            --region        "$AWS_REGION" \
+            --artifact-bucket "${{ env.ARTIFACT_BUCKET }}" \
+            --artifact-prefix "artifacts/latest"
 
+      # ── Post-deploy verification ──────────────────────────────────────────
       - name: Verify deployment
         env:
           PYTHONPATH: .
         run: |
           uv run python fraud_detection_mlops/scripts/verify_deployment.py \
-            --endpoint-name $SAGEMAKER_ENDPOINT \
-            --region $AWS_REGION
+            --endpoint-name "$SAGEMAKER_ENDPOINT" \
+            --region        "$AWS_REGION"
+
+      # ── On failure: tag the bad image so it's easy to find ───────────────
+      - name: Tag failed image
+        if: failure()
+        run: |
+          aws ecr batch-delete-image \
+            --repository-name $ECR_REPOSITORY \
+            --image-ids imageTag=failed-deploy || true
+
+          # Re-tag the bad image so it's identifiable
+          MANIFEST=$(aws ecr batch-get-image \
+            --repository-name $ECR_REPOSITORY \
+            --image-ids imageTag=${{ steps.image.outputs.image_tag }} \
+            --query "images[0].imageManifest" \
+            --output text)
+
+          aws ecr put-image \
+            --repository-name $ECR_REPOSITORY \
+            --image-tag "failed-deploy" \
+            --image-manifest "$MANIFEST" || true
+
+          echo "⚠️  Failed image tagged as 'failed-deploy' in ECR"

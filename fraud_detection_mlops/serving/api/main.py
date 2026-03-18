@@ -223,6 +223,13 @@ async def predict(request: PredictRequest) -> PredictResponse:
     )
 
 
+@app.post("/invocations", response_model=PredictResponse)
+async def invocations(request: PredictRequest) -> PredictResponse:
+    """SageMaker inference endpoint — alias for /predict."""
+    result: PredictResponse = await predict(request)
+    return result
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     """

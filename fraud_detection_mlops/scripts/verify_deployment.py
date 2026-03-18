@@ -1,8 +1,5 @@
 """
 Verify a SageMaker deployment is healthy after rollout.
-
-Calls /health and /predict on the deployed endpoint.
-Fails loudly if anything is wrong — blocks the deploy pipeline.
 """
 
 from __future__ import annotations
@@ -24,7 +21,6 @@ def main(
     """Verify the deployed endpoint responds correctly."""
     runtime = boto3.client("sagemaker-runtime", region_name=region)
 
-    # Build a test payload
     payload = {f"V{i}": 0.0 for i in range(1, 29)}
     payload["Amount"] = 100.0
 
@@ -39,7 +35,6 @@ def main(
     result = json.loads(response["Body"].read())
     logger.info("Response: {}", result)
 
-    # Validate response shape
     assert "fraud_probability" in result, "Missing fraud_probability"
     assert "is_fraud" in result, "Missing is_fraud"
     assert 0.0 <= result["fraud_probability"] <= 1.0, "Score out of range"

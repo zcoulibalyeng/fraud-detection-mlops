@@ -6,8 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: fraud-detection-mlops
+  PYTHON_VERSION: "3.11"
+
 jobs:
-  test:
+  # ── Quality gates ────────────────────────────────────────────────────────
+  lint:
+    name: Lint & Format
     runs-on: ubuntu-latest
 
     steps:
@@ -18,8 +25,8 @@ jobs:
         with:
           version: "latest"
 
-      - name: Set up Python 3.11
-        run: uv python install 3.11
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        run: uv python install ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
         run: uv sync --extra dev
@@ -27,17 +34,147 @@ jobs:
       - name: Lint with ruff
         run: uv run ruff check .
 
-      - name: Check formatting
+      - name: Check formatting with black
         run: uv run black --check .
 
-      - name: Type check
-        run: uv run mypy fraud_detection_mlops/configs/ fraud_detection_mlops/training/features/ fraud_detection_mlops/training/models/ fraud_detection_mlops/serving/api/schemas.py --ignore-missing-imports
+      - name: Type check with mypy
+        run: |
+          uv run mypy \
+            fraud_detection_mlops/configs/ \
+            fraud_detection_mlops/training/features/ \
+            fraud_detection_mlops/training/models/ \
+            fraud_detection_mlops/serving/api/schemas.py \
+            --ignore-missing-imports
 
-      - name: Run unit tests
-        run: uv run pytest tests/unit/ -v
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+        with:
+          version: "latest"
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Run unit tests with coverage
+        run: |
+          uv run pytest tests/unit/ \
+            -v \
+            --tb=short \
+            --cov=fraud_detection_mlops \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml \
+            --cov-fail-under=70
         env:
           ENV: dev
           MLFLOW_TRACKING_URI: http://localhost:5000
 
-      - name: Build Docker image (smoke test)
-        run: docker build -f Dockerfile -t fraud-detector:ci .
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 7
+
+  # ── Docker build ─────────────────────────────────────────────────────────
+  build:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: test
+
+    # Only build the full image on main/develop — PRs just run lint+test
+    if: github.event_name == 'push'
+
+    outputs:
+      image_uri: ${{ steps.build.outputs.image_uri }}
+      image_tag: ${{ steps.build.outputs.image_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, smoke-test, and push image
+        id: build
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+          echo "Building $IMAGE_URI"
+
+          # linux/amd64 is required — SageMaker does not support ARM
+          docker build \
+            --platform linux/amd64 \
+            -f Dockerfile \
+            -t $IMAGE_URI \
+            .
+
+          # Smoke test: start the container and verify /ping responds
+          docker run --rm -d -p 8080:8080 --name ci-smoke $IMAGE_URI
+          echo "Waiting for container to start..."
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:8080/ping > /dev/null 2>&1; then
+              echo "✓ /ping OK after ${i}s"
+              break
+            fi
+            if [ $i -eq 15 ]; then
+              echo "✗ Container failed to start in 15s"
+              docker logs ci-smoke
+              docker stop ci-smoke
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # Test /invocations returns a valid prediction
+          RESPONSE=$(curl -sf -X POST http://localhost:8080/invocations \
+            -H "Content-Type: application/json" \
+            -d '{
+              "V1":0.0,"V2":0.0,"V3":0.0,"V4":0.0,"V5":0.0,"V6":0.0,"V7":0.0,
+              "V8":0.0,"V9":0.0,"V10":0.0,"V11":0.0,"V12":0.0,"V13":0.0,"V14":0.0,
+              "V15":0.0,"V16":0.0,"V17":0.0,"V18":0.0,"V19":0.0,"V20":0.0,"V21":0.0,
+              "V22":0.0,"V23":0.0,"V24":0.0,"V25":0.0,"V26":0.0,"V27":0.0,"V28":0.0,
+              "Amount":100.0
+            }')
+          echo "Response: $RESPONSE"
+
+          echo $RESPONSE | python3 -c "
+          import sys, json
+          r = json.load(sys.stdin)
+          assert 'fraud_probability' in r, 'Missing fraud_probability'
+          assert 'is_fraud' in r,          'Missing is_fraud'
+          assert 0.0 <= r['fraud_probability'] <= 1.0, 'Score out of range'
+          print('✓ /invocations response valid')
+          "
+
+          docker stop ci-smoke
+
+          # Push — both the sha tag and latest
+          docker push $IMAGE_URI
+          docker tag $IMAGE_URI $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+          echo "✓ Pushed $IMAGE_URI"
+          echo "image_uri=$IMAGE_URI"   >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG"   >> $GITHUB_OUTPUT
