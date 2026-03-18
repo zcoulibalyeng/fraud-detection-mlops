@@ -10,8 +10,8 @@ build/
 .venv/
 venv/
 
-# uv
-uv.lock
+## uv
+#uv.lock
 
 # Environment
 .env
