@@ -9,6 +9,7 @@ on:
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: fraud-detection-mlops
+  ARTIFACT_BUCKET: fraud-mlops-artifacts
   PYTHON_VERSION: "3.11"
 
 jobs:
@@ -113,6 +114,18 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # Download models from S3 so the smoke test container has them at runtime.
+      # Models are NOT committed to git — S3 is the source of truth for artifacts.
+      - name: Download model artifacts from S3
+        run: |
+          mkdir -p models
+          aws s3 cp s3://${{ env.ARTIFACT_BUCKET }}/artifacts/latest/model.joblib \
+            models/model.joblib
+          aws s3 cp s3://${{ env.ARTIFACT_BUCKET }}/artifacts/latest/feature_pipeline.joblib \
+            models/feature_pipeline.joblib
+          echo "✓ Models downloaded"
+          ls -lh models/
+
       - name: Build, smoke-test, and push image
         id: build
         env:
@@ -130,8 +143,12 @@ jobs:
             -t $IMAGE_URI \
             .
 
-          # Smoke test: start the container and verify /ping responds
-          docker run --rm -d -p 8080:8080 --name ci-smoke $IMAGE_URI
+          # Mount models/ into the container so it finds the artifacts at startup.
+          # In production, SageMaker injects them via the artifact bucket config.
+          docker run --rm -d -p 8080:8080 \
+            -v $(pwd)/models:/app/models \
+            --name ci-smoke $IMAGE_URI
+
           echo "Waiting for container to start..."
           for i in $(seq 1 15); do
             if curl -sf http://localhost:8080/ping > /dev/null 2>&1; then
@@ -176,5 +193,5 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
           echo "✓ Pushed $IMAGE_URI"
-          echo "image_uri=$IMAGE_URI"   >> $GITHUB_OUTPUT
-          echo "image_tag=$IMAGE_TAG"   >> $GITHUB_OUTPUT
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
