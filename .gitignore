@@ -10,6 +10,8 @@ build/
 .venv/
 venv/
 
+echo '!models/model.joblib' >> .gitignore
+echo '!models/feature_pipeline.joblib' >> .gitignore
 ## uv
 #uv.lock
 
