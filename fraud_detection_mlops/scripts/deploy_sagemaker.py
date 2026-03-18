@@ -56,12 +56,22 @@ def main(
             EndpointName=endpoint_name,
             EndpointConfigName=config_name,
         )
-    except sm.exceptions.ResourceNotFoundException:
+    except sm.exceptions.ResourceNotFound:
         logger.info("Endpoint not found — creating new endpoint")
         sm.create_endpoint(
             EndpointName=endpoint_name,
             EndpointConfigName=config_name,
         )
+    except Exception as exc:
+        # Handle ValidationException for non-existent endpoint
+        if "Could not find endpoint" in str(exc):
+            logger.info("Endpoint not found — creating new endpoint")
+            sm.create_endpoint(
+                EndpointName=endpoint_name,
+                EndpointConfigName=config_name,
+            )
+        else:
+            raise
 
     if wait:
         logger.info("Waiting for endpoint to become InService...")
