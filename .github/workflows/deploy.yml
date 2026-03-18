@@ -73,8 +73,9 @@ jobs:
       - name: Update SageMaker endpoint
         env:
           IMAGE_URI: ${{ steps.build-image.outputs.image }}
+          PYTHONPATH: .
         run: |
-          uv run python fraud_detection_mlops/fraud_detection_mlops/scripts/deploy_sagemaker.py \
+          uv run python fraud_detection_mlops/scripts/deploy_sagemaker.py \
             --image-uri $IMAGE_URI \
             --endpoint-name $SAGEMAKER_ENDPOINT \
             --region $AWS_REGION
