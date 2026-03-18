@@ -24,8 +24,10 @@ COPY --from=builder /app/.venv /app/.venv
 COPY fraud_detection_mlops/ ./fraud_detection_mlops/
 
 # Copy model artifact and training data for pipeline fitting
-COPY models/model.joblib ./models/model.joblib
-COPY fraud_detection_mlops/data/processed/train.parquet ./fraud_detection_mlops/data/processed/train.parquet
+#COPY models/model.joblib ./models/model.joblib
+#COPY fraud_detection_mlops/data/processed/train.parquet ./fraud_detection_mlops/data/processed/train.parquet
+
+RUN mkdir -p /app/models
 
 # Environment
 ENV PATH="/app/.venv/bin:$PATH" \

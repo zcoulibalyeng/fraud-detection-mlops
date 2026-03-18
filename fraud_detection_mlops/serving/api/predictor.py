@@ -11,10 +11,10 @@ It does NOT know about HTTP, request validation, or response formatting.
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
-import joblib
 import mlflow
 import mlflow.sklearn
 import mlflow.xgboost
@@ -63,77 +63,130 @@ class Predictor:
         self._loaded: bool = False
         self._load_time: float = 0.0
 
+    # def load(self) -> None:
+    #     """
+    #     Load model and pipeline from MLflow registry.
+    #
+    #     Falls back to local files if MLflow is unavailable.
+    #     Called once at application startup via FastAPI lifespan.
+    #     Runs a warmup prediction after loading to eliminate cold-start
+    #     latency on the first real request.
+    #     """
+    #     settings = get_settings()
+    #     mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+    #
+    #     # Get target from Env Vars (set these in SageMaker/Docker)
+    #     model_name = os.getenv("MODEL_NAME", self.model_name)
+    #     model_alias = os.getenv("MODEL_ALIAS", "champion")
+    #
+    #     logger.info(f"Fetching model '{model_name}' with alias '{model_alias}'")
+    #
+    #     start = time.perf_counter()
+    #     os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "10")
+    #
+    #     logger.info(
+    #         "Loading model '{}' from MLflow at {}",
+    #         self.model_name,
+    #         settings.mlflow_tracking_uri,
+    #     )
+    #
+    #     try:
+    #         client = mlflow.tracking.MlflowClient()
+    #
+    #         # Get the latest version's run ID directly
+    #         versions = client.search_model_versions(f"name='{self.model_name}'")
+    #         if not versions:
+    #             raise RuntimeError(f"No versions found for '{self.model_name}'")
+    #
+    #         latest = sorted(versions, key=lambda v: int(v.version), reverse=True)[0]
+    #         run_id = latest.run_id
+    #         logger.info("Found model version={} run_id={}", latest.version, run_id[:8])
+    #
+    #         # Load XGBoost model using run URI
+    #         xgb_underlying = mlflow.xgboost.load_model(f"runs:/{run_id}/model")
+    #
+    #         # Wrap in our XGBoostFraudModel
+    #         self._model = XGBoostFraudModel.__new__(XGBoostFraudModel)
+    #         self._model._model = xgb_underlying
+    #         self._model._feature_names = ALL_FEATURES
+    #         self._model._best_iteration = 0
+    #         self._model._train_time_seconds = 0.0
+    #         self._model_version = f"v{latest.version}-{run_id[:8]}"
+    #
+    #         # Load the fitted feature pipeline from the same run
+    #         try:
+    #             pipeline_uri = f"runs:/{run_id}/feature_pipeline"
+    #             self._pipeline = mlflow.sklearn.load_model(pipeline_uri)
+    #             logger.info("Loaded fitted feature pipeline from MLflow")
+    #         except Exception as pipe_exc:
+    #             logger.warning("Could not load pipeline from MLflow: {}", pipe_exc)
+    #             self._load_local_pipeline()
+    #
+    #     except Exception as exc:
+    #         logger.warning("MLflow load failed ({}), attempting local fallback", exc)
+    #         self._load_local_fallback()
+    #
+    #     load_duration = time.perf_counter() - start
+    #     self._load_time = load_duration
+    #     self._loaded = True
+    #
+    #     logger.info(
+    #         "Model loaded in {:.2f}s (version={})",
+    #         load_duration,
+    #         self._model_version,
+    #     )
+    #
+    #     # Warmup — eliminates first-request cold start
+    #     self._warmup()
+
     def load(self) -> None:
         """
         Load model and pipeline from MLflow registry.
-
-        Falls back to local files if MLflow is unavailable.
-        Called once at application startup via FastAPI lifespan.
-        Runs a warmup prediction after loading to eliminate cold-start
-        latency on the first real request.
+        In Production, this fetches from S3/Artifact store via MLflow.
         """
         settings = get_settings()
         mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
 
-        logger.info(
-            "Loading model '{}' from MLflow at {}",
-            self.model_name,
-            settings.mlflow_tracking_uri,
-        )
+        # Get target from Env Vars (set these in SageMaker/Docker)
+        model_name = os.getenv("MODEL_NAME", self.model_name)
+        model_alias = os.getenv("MODEL_ALIAS", "champion")
+
+        logger.info(f"Fetching model '{model_name}' with alias '{model_alias}'")
 
         start = time.perf_counter()
-
-        import os
-
-        os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "5")
+        os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "10")
 
         try:
             client = mlflow.tracking.MlflowClient()
 
-            # Get the latest version's run ID directly
-            versions = client.search_model_versions(f"name='{self.model_name}'")
-            if not versions:
-                raise RuntimeError(f"No versions found for '{self.model_name}'")
+            # 1. Get version by alias (The MLflow 2.9+ way)
+            model_version = client.get_model_version_by_alias(model_name, model_alias)
+            run_id = model_version.run_id
+            self._model_version = f"v{model_version.version}-{run_id[:8]}"
 
-            latest = sorted(versions, key=lambda v: int(v.version), reverse=True)[0]
-            run_id = latest.run_id
-            logger.info("Found model version={} run_id={}", latest.version, run_id[:8])
-
-            # Load XGBoost model using run URI
+            # 2. Load XGBoost model directly from the run
             xgb_underlying = mlflow.xgboost.load_model(f"runs:/{run_id}/model")
 
-            # Wrap in our XGBoostFraudModel
+            # Reconstruct our wrapper
             self._model = XGBoostFraudModel.__new__(XGBoostFraudModel)
             self._model._model = xgb_underlying
             self._model._feature_names = ALL_FEATURES
-            self._model._best_iteration = 0
-            self._model._train_time_seconds = 0.0
-            self._model_version = f"v{latest.version}-{run_id[:8]}"
+            self._model._best_iteration = 0  # Not strictly needed for inference
 
-            # Load the fitted feature pipeline from the same run
-            try:
-                pipeline_uri = f"runs:/{run_id}/feature_pipeline"
-                self._pipeline = mlflow.sklearn.load_model(pipeline_uri)
-                logger.info("Loaded fitted feature pipeline from MLflow")
-            except Exception as pipe_exc:
-                logger.warning("Could not load pipeline from MLflow: {}", pipe_exc)
-                self._load_local_pipeline()
+            # 3. Load the EXACT fitted pipeline used in that run
+            pipeline_uri = f"runs:/{run_id}/feature_pipeline"
+            self._pipeline = mlflow.sklearn.load_model(pipeline_uri)
+
+            logger.success(
+                f"Production model {self._model_version} loaded from registry"
+            )
 
         except Exception as exc:
-            logger.warning("MLflow load failed ({}), attempting local fallback", exc)
+            logger.error(f"Registry load failed: {exc}. Falling back to local/mock.")
             self._load_local_fallback()
 
-        load_duration = time.perf_counter() - start
-        self._load_time = load_duration
+        self._load_time = time.perf_counter() - start
         self._loaded = True
-
-        logger.info(
-            "Model loaded in {:.2f}s (version={})",
-            load_duration,
-            self._model_version,
-        )
-
-        # Warmup — eliminates first-request cold start
         self._warmup()
 
     def _load_local_fallback(self) -> None:
@@ -163,53 +216,74 @@ class Predictor:
         )
         self._model_version = "mock"
 
+    # def _load_local_pipeline(self) -> None:
+    #     """
+    #     Load the fitted feature pipeline from local filesystem.
+    #
+    #     Searches for the pipeline saved by MLflow or as a standalone file.
+    #     If not found, fits a new pipeline on dummy data as last resort.
+    #     """
+    #     pipeline_paths = [
+    #         Path("models/feature_pipeline"),
+    #         Path("models/feature_pipeline/model.pkl"),
+    #         Path("fraud_detection_mlops/models/feature_pipeline"),
+    #     ]
+    #
+    #     for pp in pipeline_paths:
+    #         if pp.exists():
+    #             try:
+    #                 if pp.is_dir():
+    #                     self._pipeline = mlflow.sklearn.load_model(str(pp))
+    #                 else:
+    #                     self._pipeline = joblib.load(pp)
+    #                 logger.info("Loaded fitted pipeline from: {}", pp)
+    #                 return
+    #             except Exception as exc:
+    #                 logger.warning("Failed to load pipeline from {}: {}", pp, exc)
+    #
+    #     # Last resort: fit pipeline on the training data if available
+    #     train_paths = [
+    #         Path("fraud_detection_mlops/data/processed/train.parquet"),
+    #         Path("data/processed/train.parquet"),
+    #     ]
+    #
+    #     for tp in train_paths:
+    #         if tp.exists():
+    #             try:
+    #                 logger.info("Fitting pipeline from training data: {}", tp)
+    #                 train_df = pd.read_parquet(tp)
+    #                 self._pipeline = build_feature_pipeline()
+    #                 self._pipeline.fit(train_df[ALL_FEATURES])
+    #                 logger.info("Pipeline fitted on {:,} training rows", len(train_df))
+    #                 return
+    #             except Exception as exc:
+    #                 logger.warning("Failed to fit pipeline from {}: {}", tp, exc)
+    #
+    #     logger.warning(
+    #         "No fitted pipeline found and no training data available. "
+    #         "Using unfitted pipeline — predictions will be incorrect."
+    #     )
+
     def _load_local_pipeline(self) -> None:
         """
-        Load the fitted feature pipeline from local filesystem.
-
-        Searches for the pipeline saved by MLflow or as a standalone file.
-        If not found, fits a new pipeline on dummy data as last resort.
+        Refactored: Removed 'fit on train.parquet' logic to prevent Docker
+        build failures. Only loads pre-fitted pipelines.
         """
         pipeline_paths = [
             Path("models/feature_pipeline"),
-            Path("models/feature_pipeline/model.pkl"),
             Path("fraud_detection_mlops/models/feature_pipeline"),
         ]
 
         for pp in pipeline_paths:
             if pp.exists():
                 try:
-                    if pp.is_dir():
-                        self._pipeline = mlflow.sklearn.load_model(str(pp))
-                    else:
-                        self._pipeline = joblib.load(pp)
-                    logger.info("Loaded fitted pipeline from: {}", pp)
+                    self._pipeline = mlflow.sklearn.load_model(str(pp))
+                    logger.info("Loaded local fitted pipeline from: {}", pp)
                     return
                 except Exception as exc:
-                    logger.warning("Failed to load pipeline from {}: {}", pp, exc)
+                    logger.warning("Failed to load local pipeline: {}", exc)
 
-        # Last resort: fit pipeline on the training data if available
-        train_paths = [
-            Path("fraud_detection_mlops/data/processed/train.parquet"),
-            Path("data/processed/train.parquet"),
-        ]
-
-        for tp in train_paths:
-            if tp.exists():
-                try:
-                    logger.info("Fitting pipeline from training data: {}", tp)
-                    train_df = pd.read_parquet(tp)
-                    self._pipeline = build_feature_pipeline()
-                    self._pipeline.fit(train_df[ALL_FEATURES])
-                    logger.info("Pipeline fitted on {:,} training rows", len(train_df))
-                    return
-                except Exception as exc:
-                    logger.warning("Failed to fit pipeline from {}: {}", tp, exc)
-
-        logger.warning(
-            "No fitted pipeline found and no training data available. "
-            "Using unfitted pipeline — predictions will be incorrect."
-        )
+        logger.error("No fitted pipeline found. Using unfitted default (INACCURATE).")
 
     def _warmup(self) -> None:
         """
