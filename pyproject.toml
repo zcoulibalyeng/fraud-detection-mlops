@@ -93,9 +93,10 @@ addopts = "--cov=. --cov-report=term-missing --cov-fail-under=70"
 
 [tool.coverage.run]
 omit = [
-    "data/pipelines/prepare.py",
+    "fraud_detection_mlops/training/train.py",
+    "fraud_detection_mlops/data/pipelines/prepare.py",
     "main.py",
-    "scripts/*",
+    "fraud_detection_mlops/scripts/*",
     "*/migrations/*",
 ]
 

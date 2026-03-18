@@ -31,7 +31,7 @@ class TestPredictor:
         """When no model file exists, predictor uses mock — returns 0.05."""
         p = Predictor()
         # Simulate load with mock fallback (no MLflow, no local file)
-        with patch.object(p, "_load_local_fallback") as mock_fallback:
+        with patch.object(p, "_load_local_pipeline") as mock_fallback:
             mock_fallback.side_effect = lambda: setattr(p, "_model_version", "mock")
             p._loaded = True
             p._model_version = "mock"
@@ -65,3 +65,25 @@ class TestPredictor:
 
         score, _ = p.predict(_make_features())
         assert 0.0 <= score <= 1.0
+
+    def test_predictor_is_not_loaded_before_load_called(self) -> None:
+        p = Predictor(
+            model_name="fraud-detector", model_stage="Production", threshold=0.5
+        )
+        assert p.is_loaded is False
+
+    def test_predictor_raises_when_not_loaded(self) -> None:
+        from fraud_detection_mlops.serving.api.predictor import ModelNotLoadedError
+
+        p = Predictor(
+            model_name="fraud-detector", model_stage="Production", threshold=0.5
+        )
+        with pytest.raises((ModelNotLoadedError, Exception)):
+            p.predict({"V1": 0.0, "Amount": 100.0})
+
+    def test_predictor_model_version_before_load(self) -> None:
+        p = Predictor(
+            model_name="fraud-detector", model_stage="Production", threshold=0.5
+        )
+        # Should return some default, not raise
+        assert isinstance(p.model_version, str)
