@@ -1,7 +1,5 @@
 """Tests for the settings and config loading module."""
 
-# from configs.settings import Settings, get_settings
-
 from fraud_detection_mlops.configs.settings import Settings, get_settings
 
 

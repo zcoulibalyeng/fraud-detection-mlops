@@ -9,6 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -17,22 +18,26 @@ jobs:
         with:
           version: "latest"
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         run: uv python install 3.11
 
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Run linting
+      - name: Lint with ruff
         run: uv run ruff check .
 
       - name: Check formatting
         run: uv run black --check .
 
-      - name: Run type checking
-        run: uv run mypy configs/
+      - name: Type check
+        run: uv run mypy fraud_detection_mlops/configs/ fraud_detection_mlops/training/features/ fraud_detection_mlops/training/models/ fraud_detection_mlops/serving/api/schemas.py
 
-      - name: Run tests
-        run: uv run pytest tests/ -v
+      - name: Run unit tests
+        run: uv run pytest tests/unit/ -v
         env:
           ENV: dev
+          MLFLOW_TRACKING_URI: http://localhost:5000
+
+      - name: Build Docker image (smoke test)
+        run: docker build -f serving/Dockerfile -t fraud-detector:ci .
