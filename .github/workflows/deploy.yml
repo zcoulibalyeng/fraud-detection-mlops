@@ -31,6 +31,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # --- NEW STEPS TO FIX THE ERROR ---
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+        with:
+          version: "latest"
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --no-dev
+
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -61,13 +74,13 @@ jobs:
         env:
           IMAGE_URI: ${{ steps.build-image.outputs.image }}
         run: |
-          python fraud_detection_mlops/scripts/deploy_sagemaker.py \
+          uv run python fraud_detection_mlops/fraud_detection_mlops/scripts/deploy_sagemaker.py \
             --image-uri $IMAGE_URI \
             --endpoint-name $SAGEMAKER_ENDPOINT \
             --region $AWS_REGION
 
       - name: Verify deployment
         run: |
-          python fraud_detection_mlops/scripts/verify_deployment.py \
+          uv run python fraud_detection_mlops/scripts/verify_deployment.py \
             --endpoint-name $SAGEMAKER_ENDPOINT \
             --region $AWS_REGION
