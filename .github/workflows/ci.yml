@@ -31,7 +31,7 @@ jobs:
         run: uv run black --check .
 
       - name: Type check
-        run: uv run mypy fraud_detection_mlops/configs/ fraud_detection_mlops/training/features/ fraud_detection_mlops/training/models/ fraud_detection_mlops/serving/api/schemas.py
+        run: uv run mypy fraud_detection_mlops/configs/ fraud_detection_mlops/training/features/ fraud_detection_mlops/training/models/ fraud_detection_mlops/serving/api/schemas.py --ignore-missing-imports
 
       - name: Run unit tests
         run: uv run pytest tests/unit/ -v

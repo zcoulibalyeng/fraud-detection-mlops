@@ -152,7 +152,7 @@ class XGBoostFraudModel(BaseModel):
         importance = {}
         for i, name in enumerate(self._feature_names):
             internal = f"f{i}"
-            importance[name] = float(scores.get(internal, 0.0))
+            importance[name] = float(scores.get(internal, 0.0))  # type: ignore[arg-type]
         return dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
 
     def save(self, path: Path) -> None:

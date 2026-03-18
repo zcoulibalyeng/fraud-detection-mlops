@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import mlflow
 import mlflow.sklearn
+import mlflow.xgboost
 import pandas as pd
 import typer
 from loguru import logger
@@ -58,23 +59,44 @@ def get_champion_metrics(
     """
     Fetch the current Production model's test metrics from MLflow.
 
+    Uses the alias-based API (MLflow 2.9+) instead of deprecated stages.
     Returns None if no production model exists (first deployment).
     """
     try:
-        versions = mlflow_client.get_latest_versions(model_name, stages=["Production"])
-        if not versions:
-            logger.info("No champion found — first deployment")
+        # Try alias-based lookup first (MLflow 2.9+)
+        try:
+            version = mlflow_client.get_model_version_by_alias(model_name, "champion")
+            run = mlflow_client.get_run(version.run_id)
+            metrics = run.data.metrics
+            logger.info(
+                "Champion found via alias: run_id={} auc_pr={:.4f}",
+                version.run_id[:8],
+                metrics.get("test_auc_pr", 0.0),
+            )
+            return cast(dict[Any, Any], metrics)
+        except Exception:
+            pass
+
+        # Fallback: search for the most recent registered version
+        # that has been manually marked as production
+        results = mlflow_client.search_model_versions(
+            f"name='{model_name}'",
+            order_by=["version_number DESC"],
+            max_results=1,
+        )
+        if not results:
+            logger.info("No champion found — this is the first deployment")
             return None
 
-        champion_run_id = versions[0].run_id
-        run = mlflow_client.get_run(champion_run_id)
-        metrics = cast(dict[str, float], run.data.metrics)
-        logger.info(
-            "Champion found: run_id={} auc_pr={:.4f}",
-            champion_run_id[:8],
-            metrics.get("test_auc_pr", 0.0),
-        )
-        return metrics
+        # Check if any version has champion tag
+        for mv in results:
+            tags = mv.tags or {}
+            if tags.get("stage") == "production":
+                run = mlflow_client.get_run(mv.run_id)
+                return cast(dict[Any, Any], run.data.metrics)
+
+        logger.info("No production-tagged version found — first deployment")
+        return None
 
     except Exception as exc:
         logger.warning("Could not fetch champion metrics: {}", exc)
@@ -160,7 +182,7 @@ def run_training_pipeline(
         # Log pipeline as artifact — required for serving
         mlflow.sklearn.log_model(
             pipeline,
-            artifact_path="feature_pipeline",
+            name="feature_pipeline",
         )
         logger.info("Feature pipeline logged to MLflow")
 
@@ -244,7 +266,16 @@ def run_training_pipeline(
         logger.info("=== Step 6: Saving model ===")
         model_path = Path(output_dir) / "model.joblib"
         model.save(model_path)
-        mlflow.log_artifact(str(model_path), artifact_path="model")
+        # Log as MLflow model (required for register_model to work)
+        mlflow.log_artifact(str(model_path), "model_artifact")
+
+        # Also log the XGBoost model natively — this creates the
+        # logged_model entry that register_model requires
+        mlflow.xgboost.log_model(
+            xgb_model=model._model,
+            name="model",
+            input_example=X_test[:1],
+        )
 
         # ── Step 7: Evaluation gate ────────────────────────────────────
         logger.info("=== Step 7: Evaluation gate ===")
@@ -280,13 +311,24 @@ def run_training_pipeline(
                 model_uri=model_uri,
                 name=mlflow_cfg["model_name"],
             )
-            client.transition_model_version_stage(
+
+            # Set alias "champion" on this version (replaces deprecated stages)
+            client.set_registered_model_alias(
+                name=mlflow_cfg["model_name"],
+                alias="champion",
+                version=registered.version,
+            )
+
+            # Tag it so we can query it later
+            client.set_model_version_tag(
                 name=mlflow_cfg["model_name"],
                 version=registered.version,
-                stage="Staging",
+                key="stage",
+                value="production",
             )
+
             logger.success(
-                "Model registered: name={} version={} stage=Staging",
+                "Model registered: name={} version={} alias=champion",
                 mlflow_cfg["model_name"],
                 registered.version,
             )

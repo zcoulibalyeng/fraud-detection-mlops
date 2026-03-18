@@ -14,13 +14,18 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import joblib
 import mlflow
 import mlflow.sklearn
+import mlflow.xgboost
 import pandas as pd
 from loguru import logger
 
 from fraud_detection_mlops.configs.settings import get_settings
-from fraud_detection_mlops.training.features.feature_eng import build_feature_pipeline
+from fraud_detection_mlops.training.features.feature_eng import (
+    ALL_FEATURES,
+    build_feature_pipeline,
+)
 from fraud_detection_mlops.training.models.xgb_model import XGBoostFraudModel
 
 
@@ -62,6 +67,7 @@ class Predictor:
         """
         Load model and pipeline from MLflow registry.
 
+        Falls back to local files if MLflow is unavailable.
         Called once at application startup via FastAPI lifespan.
         Runs a warmup prediction after loading to eliminate cold-start
         latency on the first real request.
@@ -70,38 +76,50 @@ class Predictor:
         mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
 
         logger.info(
-            "Loading model '{}' stage='{}' from MLflow at {}",
+            "Loading model '{}' from MLflow at {}",
             self.model_name,
-            self.model_stage,
             settings.mlflow_tracking_uri,
         )
 
         start = time.perf_counter()
 
+        import os
+
+        os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "5")
+
         try:
-            model_uri = f"models:/{self.model_name}/{self.model_stage}"
-            # Load the full MLflow model (includes feature pipeline)
-            loaded = mlflow.pyfunc.load_model(model_uri)
-            self._model_version = (
-                loaded.metadata.run_id[:8] if loaded.metadata else "unknown"
-            )
+            client = mlflow.tracking.MlflowClient()
 
-            # Unwrap to our XGBoostFraudModel for typed access
-            self._model = loaded.unwrap_python_model()  # type: ignore[assignment]
+            # Get the latest version's run ID directly
+            versions = client.search_model_versions(f"name='{self.model_name}'")
+            if not versions:
+                raise RuntimeError(f"No versions found for '{self.model_name}'")
 
-            # Load fitted pipeline artifact from the same run
-            pipeline_uri = f"{model_uri}/feature_pipeline"
+            latest = sorted(versions, key=lambda v: int(v.version), reverse=True)[0]
+            run_id = latest.run_id
+            logger.info("Found model version={} run_id={}", latest.version, run_id[:8])
+
+            # Load XGBoost model using run URI
+            xgb_underlying = mlflow.xgboost.load_model(f"runs:/{run_id}/model")
+
+            # Wrap in our XGBoostFraudModel
+            self._model = XGBoostFraudModel.__new__(XGBoostFraudModel)
+            self._model._model = xgb_underlying
+            self._model._feature_names = ALL_FEATURES
+            self._model._best_iteration = 0
+            self._model._train_time_seconds = 0.0
+            self._model_version = f"v{latest.version}-{run_id[:8]}"
+
+            # Load the fitted feature pipeline from the same run
             try:
+                pipeline_uri = f"runs:/{run_id}/feature_pipeline"
                 self._pipeline = mlflow.sklearn.load_model(pipeline_uri)
-                logger.info("Loaded feature pipeline from MLflow")
-            except Exception:
-                logger.warning(
-                    "Feature pipeline not found in MLflow — "
-                    "using default unfitted pipeline"
-                )
+                logger.info("Loaded fitted feature pipeline from MLflow")
+            except Exception as pipe_exc:
+                logger.warning("Could not load pipeline from MLflow: {}", pipe_exc)
+                self._load_local_pipeline()
 
         except Exception as exc:
-            # In development, fall back to loading from local path
             logger.warning("MLflow load failed ({}), attempting local fallback", exc)
             self._load_local_fallback()
 
@@ -122,20 +140,76 @@ class Predictor:
         """
         Load model from local filesystem for development.
 
-        Looks for model.joblib in the project root.
-        This path is never used in production — only local dev.
+        Searches multiple common paths for model.joblib.
         """
-        local_path = Path("model.joblib")
-        if local_path.exists():
-            self._model = XGBoostFraudModel.load(local_path)
-            self._model_version = "local-dev"
-            logger.info("Loaded model from local fallback: {}", local_path)
-        else:
-            logger.warning(
-                "No model found locally. Predictor will return mock scores. "
-                "Train a model first: make train"
-            )
-            self._model_version = "mock"
+        search_paths = [
+            Path("models/model.joblib"),
+            Path("model.joblib"),
+            Path("fraud_detection_mlops/models/model.joblib"),
+        ]
+
+        for local_path in search_paths:
+            if local_path.exists():
+                self._model = XGBoostFraudModel.load(local_path)
+                self._model_version = "local-dev"
+                logger.info("Loaded model from local fallback: {}", local_path)
+                self._load_local_pipeline()
+                return
+
+        logger.warning(
+            "No model found locally at any of: {}. "
+            "Predictor will return mock scores.",
+            [str(p) for p in search_paths],
+        )
+        self._model_version = "mock"
+
+    def _load_local_pipeline(self) -> None:
+        """
+        Load the fitted feature pipeline from local filesystem.
+
+        Searches for the pipeline saved by MLflow or as a standalone file.
+        If not found, fits a new pipeline on dummy data as last resort.
+        """
+        pipeline_paths = [
+            Path("models/feature_pipeline"),
+            Path("models/feature_pipeline/model.pkl"),
+            Path("fraud_detection_mlops/models/feature_pipeline"),
+        ]
+
+        for pp in pipeline_paths:
+            if pp.exists():
+                try:
+                    if pp.is_dir():
+                        self._pipeline = mlflow.sklearn.load_model(str(pp))
+                    else:
+                        self._pipeline = joblib.load(pp)
+                    logger.info("Loaded fitted pipeline from: {}", pp)
+                    return
+                except Exception as exc:
+                    logger.warning("Failed to load pipeline from {}: {}", pp, exc)
+
+        # Last resort: fit pipeline on the training data if available
+        train_paths = [
+            Path("fraud_detection_mlops/data/processed/train.parquet"),
+            Path("data/processed/train.parquet"),
+        ]
+
+        for tp in train_paths:
+            if tp.exists():
+                try:
+                    logger.info("Fitting pipeline from training data: {}", tp)
+                    train_df = pd.read_parquet(tp)
+                    self._pipeline = build_feature_pipeline()
+                    self._pipeline.fit(train_df[ALL_FEATURES])
+                    logger.info("Pipeline fitted on {:,} training rows", len(train_df))
+                    return
+                except Exception as exc:
+                    logger.warning("Failed to fit pipeline from {}: {}", tp, exc)
+
+        logger.warning(
+            "No fitted pipeline found and no training data available. "
+            "Using unfitted pipeline — predictions will be incorrect."
+        )
 
     def _warmup(self) -> None:
         """
@@ -189,7 +263,6 @@ class Predictor:
     def _predict_from_df(self, df: pd.DataFrame) -> float:
         """Internal: apply pipeline + model to a single-row DataFrame."""
         if self._model is None or self._model_version == "mock":
-            # Development mock — returns low fraud probability
             return 0.05
 
         X = self._pipeline.transform(df)

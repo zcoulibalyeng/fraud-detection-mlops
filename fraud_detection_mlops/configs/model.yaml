@@ -14,5 +14,5 @@ xgboost:
   subsample: 0.8
   colsample_bytree: 0.8
   eval_metric: aucpr
-  early_stopping_rounds: 20
+  early_stopping_rounds: 50
   scale_pos_weight: 578  # ratio of negative/positive class
