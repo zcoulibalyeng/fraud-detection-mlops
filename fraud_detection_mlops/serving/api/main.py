@@ -240,6 +240,12 @@ async def health() -> HealthResponse:
     )
 
 
+@app.get("/ping")
+async def ping() -> dict[str, str]:
+    """SageMaker health check endpoint."""
+    return {"status": "ok"}
+
+
 @app.get("/ready", response_model=ReadinessResponse)
 async def ready() -> ReadinessResponse:
     """

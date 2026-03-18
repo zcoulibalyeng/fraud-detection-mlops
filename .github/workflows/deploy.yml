@@ -1,8 +1,94 @@
-name: Deploy
-
+#name: Deploy
+#
+##on:
+##  push:
+##    branches: [main]
+#
 #on:
-#  push:
-#    branches: [main]
+#  workflow_dispatch:
+#    inputs:
+#      environment:
+#        description: 'Deploy environment'
+#        required: true
+#        default: 'production'
+#        type: choice
+#        options:
+#          - staging
+#          - production
+#
+#env:
+#  AWS_REGION: us-east-1
+#  ECR_REPOSITORY: fraud-detection-mlops
+#  SAGEMAKER_ENDPOINT: fraud-detector-prod
+#
+#jobs:
+#  deploy:
+#    runs-on: ubuntu-latest
+#    # Only deploy if CI passes
+#    needs: []
+#    if: github.ref == 'refs/heads/main'
+#
+#    steps:
+#      - uses: actions/checkout@v4
+#
+#      # --- NEW STEPS TO FIX THE ERROR ---
+#      - name: Install uv
+#        uses: astral-sh/setup-uv@v2
+#        with:
+#          version: "latest"
+#
+#      - name: Set up Python 3.11
+#        run: uv python install 3.11
+#
+#      - name: Install dependencies
+#        run: uv sync --no-dev
+#
+#
+#      - name: Configure AWS credentials
+#        uses: aws-actions/configure-aws-credentials@v4
+#        with:
+#          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#          aws-region: ${{ env.AWS_REGION }}
+#
+#      - name: Login to Amazon ECR
+#        id: login-ecr
+#        uses: aws-actions/amazon-ecr-login@v2
+#
+#      - name: Build, tag, and push image to ECR
+#        id: build-image
+#        env:
+#          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+#          IMAGE_TAG: ${{ github.sha }}
+#        run: |
+#          docker build \
+#            -f Dockerfile \
+#            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+#            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+#            .
+#          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+#          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+#          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+#
+#      - name: Update SageMaker endpoint
+#        env:
+#          IMAGE_URI: ${{ steps.build-image.outputs.image }}
+#          SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
+#          PYTHONPATH: .
+#        run: |
+#          uv run python fraud_detection_mlops/scripts/deploy_sagemaker.py \
+#            --image-uri $IMAGE_URI \
+#            --endpoint-name $SAGEMAKER_ENDPOINT \
+#            --region $AWS_REGION
+#
+#      - name: Verify deployment
+#        run: |
+#          uv run python fraud_detection_mlops/scripts/verify_deployment.py \
+#            --endpoint-name $SAGEMAKER_ENDPOINT \
+#            --region $AWS_REGION
+
+
+name: Deploy
 
 on:
   workflow_dispatch:
@@ -20,29 +106,14 @@ env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: fraud-detection-mlops
   SAGEMAKER_ENDPOINT: fraud-detector-prod
+  ARTIFACT_BUCKET: fraud-mlops-artifacts
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # Only deploy if CI passes
-    needs: []
-    if: github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v4
-
-      # --- NEW STEPS TO FIX THE ERROR ---
-      - name: Install uv
-        uses: astral-sh/setup-uv@v2
-        with:
-          version: "latest"
-
-      - name: Set up Python 3.11
-        run: uv python install 3.11
-
-      - name: Install dependencies
-        run: uv sync --no-dev
-
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -50,6 +121,12 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get AWS Account ID
+        id: account
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "account_id=$ACCOUNT_ID" >> $GITHUB_OUTPUT
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -70,7 +147,27 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
-      - name: Update SageMaker endpoint
+      - name: Create S3 bucket for artifacts
+        run: |
+          aws s3 mb s3://${{ env.ARTIFACT_BUCKET }} --region ${{ env.AWS_REGION }} 2>/dev/null || true
+
+      - name: Upload model artifacts to S3
+        run: |
+          aws s3 cp models/model.joblib s3://${{ env.ARTIFACT_BUCKET }}/artifacts/latest/model.joblib
+          aws s3 cp models/feature_pipeline.joblib s3://${{ env.ARTIFACT_BUCKET }}/artifacts/latest/feature_pipeline.joblib
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Deploy to SageMaker
         env:
           IMAGE_URI: ${{ steps.build-image.outputs.image }}
           SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
@@ -79,9 +176,13 @@ jobs:
           uv run python fraud_detection_mlops/scripts/deploy_sagemaker.py \
             --image-uri $IMAGE_URI \
             --endpoint-name $SAGEMAKER_ENDPOINT \
-            --region $AWS_REGION
+            --region $AWS_REGION \
+            --artifact-bucket ${{ env.ARTIFACT_BUCKET }} \
+            --artifact-prefix artifacts/latest
 
       - name: Verify deployment
+        env:
+          PYTHONPATH: .
         run: |
           uv run python fraud_detection_mlops/scripts/verify_deployment.py \
             --endpoint-name $SAGEMAKER_ENDPOINT \
