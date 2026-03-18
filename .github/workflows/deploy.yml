@@ -61,13 +61,13 @@ jobs:
         env:
           IMAGE_URI: ${{ steps.build-image.outputs.image }}
         run: |
-          python scripts/deploy_sagemaker.py \
+          python fraud_detection_mlops/scripts/deploy_sagemaker.py \
             --image-uri $IMAGE_URI \
             --endpoint-name $SAGEMAKER_ENDPOINT \
             --region $AWS_REGION
 
       - name: Verify deployment
         run: |
-          python scripts/verify_deployment.py \
+          python fraud_detection_mlops/scripts/verify_deployment.py \
             --endpoint-name $SAGEMAKER_ENDPOINT \
             --region $AWS_REGION
